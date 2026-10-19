@@ -377,10 +377,11 @@
         <div class="flex flex-wrap gap-2">
           <button id="btnSyncLink" type="button" class="btn bg-sage-500 hover:bg-sage-600 text-white"><i class="fa-solid fa-link"></i> Copier le lien d'invitation</button>
           <button id="btnSyncCopyCode" type="button" class="btn bg-white border border-sage-300 text-sage-700 hover:bg-sage-50"><i class="fa-regular fa-copy"></i> Copier le code</button>
+          <button id="btnSyncInfo" type="button" class="btn bg-white border border-sage-300 text-sage-700 hover:bg-sage-50"><i class="fa-solid fa-clipboard-list"></i> Copier les infos de connexion</button>
           <button id="btnSyncNow" type="button" class="btn bg-white border border-sage-300 text-sage-700 hover:bg-sage-50"><i class="fa-solid fa-rotate"></i> Synchroniser maintenant</button>
           <button id="btnSyncOff" type="button" class="btn bg-white border border-terra-300 text-terra-600 hover:bg-terra-100"><i class="fa-solid fa-plug-circle-xmark"></i> Désactiver</button>
         </div>
-        <p class="text-xs text-sage-500">Ouvrez le lien d'invitation sur votre téléphone (ou envoyez-le à votre femme) : tout est configuré d'un coup. Attention : le lien et le code donnent accès à vos menus, ne les partagez qu'avec votre famille.</p>
+        <p class="text-xs text-sage-500">Ouvrez le lien d'invitation sur votre téléphone (ou envoyez-le à votre femme) : tout est configuré d'un coup. Si le lien ne marche pas : cliquez sur « Copier les infos de connexion », collez-les dans la case 1 de l'autre appareil (section Synchronisation) puis cliquez sur « Activer ». Attention : le lien et le code donnent accès à vos menus, ne les partagez qu'avec votre famille.</p>
       </div>
 
       <details class="mt-4">
@@ -2238,31 +2239,59 @@
       await pushNow();
     } catch (e) { syncConnecting = false; handleSyncError(e); }
   }
+  // Bandeau affiché quand on ouvre un lien d'invitation (plus fiable qu'une fenêtre de confirmation)
+  function showInviteBanner(inv) {
+    if (sync.code === inv.code) { toast('Cet appareil est déjà synchronisé avec ce code ✅'); return; }
+    const b = el('div', 'bg-terra-100 border-b border-terra-300 text-sage-700 px-4 py-3 flex flex-wrap items-center gap-3 justify-center text-sm');
+    b.id = 'inviteBanner';
+    b.appendChild(el('span', 'font-bold', '☁️ Invitation reçue : activer la synchronisation avec votre famille ? (vos repas et recettes actuels seront fusionnés)'));
+    const yes = el('button', 'btn bg-sage-500 hover:bg-sage-600 text-white py-1.5', 'Oui, activer');
+    const no = el('button', 'btn bg-white border border-sage-300 text-sage-700 py-1.5', 'Plus tard');
+    yes.type = 'button'; no.type = 'button';
+    yes.addEventListener('click', () => {
+      sync = { config: inv.cfg, code: inv.code, joined: false, device: sync.device };
+      saveSyncCfg(); b.remove(); renderSyncUi(); syncConnect();
+    });
+    no.addEventListener('click', () => b.remove());
+    b.append(yes, no);
+    $('app').prepend(b);
+  }
+  function connectionInfo() {
+    const cfg = FIREBASE_CONFIG || sync.config;
+    const c = cfg ? 'const firebaseConfig = {\n' + CFG_KEYS.filter(k => cfg[k]).map(k => '  ' + k + ': "' + cfg[k] + '"').join(',\n') + '\n};\n' : '';
+    return c + 'Code famille : ' + sync.code;
+  }
   function inviteLink() {
     const o = { k: sync.code };
     if (!FIREBASE_CONFIG) o.c = sync.config;
-    return location.href.split('#')[0] + '#sync=' + b64e(JSON.stringify(o));
+    return location.href.split('#')[0].split('?')[0] + '?sync=' + b64e(JSON.stringify(o));
   }
   function syncInit() {
-    // Lien d'invitation (#sync=…) : active la synchronisation sur cet appareil
-    const m = (location.hash || '').match(/^#sync=([A-Za-z0-9_-]+)$/);
-    if (m) {
+    // Lien d'invitation (?sync=… ou #sync=…) : propose d'activer la synchronisation sur cet appareil
+    const qs = new URLSearchParams(location.search).get('sync');
+    const hm = (location.hash || '').match(/^#sync=([A-Za-z0-9_-]+)$/);
+    const token = qs || (hm && hm[1]);
+    if (token) {
+      let invite = null;
       try {
-        const o = JSON.parse(b64d(m[1]));
+        const o = JSON.parse(b64d(token));
         const code = normCode(o.k), cfg = FIREBASE_CONFIG || sanitizeCfg(o.c);
-        if (code && cfg && confirm('Activer la synchronisation sur cet appareil avec le code famille reçu ?\nVos repas et recettes actuels seront fusionnés avec ceux des autres appareils.')) {
-          sync = { config: cfg, code, joined: false, device: sync.device };
-          saveSyncCfg();
-        } else if (!code || !cfg) toast("Lien d'invitation invalide");
-      } catch (e) { toast("Lien d'invitation invalide"); }
-      try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { /* ignoré */ }
+        if (code && cfg) invite = { code, cfg };
+      } catch (e) { /* lien illisible */ }
+      try { history.replaceState(null, '', location.pathname); } catch (e) { /* ignoré */ }
+      if (invite) showInviteBanner(invite);
+      else toast("Lien d'invitation incomplet ou coupé. Utilisez « Copier les infos de connexion » à la place.");
     }
 
     $('rulesText').textContent = FIRESTORE_RULES;
     $('btnCopyRules').addEventListener('click', () => copyText(FIRESTORE_RULES, 'Règles copiées 📋'));
     $('btnGenCode').addEventListener('click', () => { $('syncCode').value = genCode(); });
     $('btnSyncOn').addEventListener('click', () => {
-      const code = normCode($('syncCode').value);
+      let code = normCode($('syncCode').value);
+      if (!code) {       // code collé avec la configuration (« Copier les infos de connexion »)
+        const mm = $('syncCfg').value.match(/\b([a-z0-9]{4}(?:-[a-z0-9]{4}){4})\b/i);
+        if (mm) { code = normCode(mm[1]); $('syncCode').value = code; }
+      }
       if (!code) { toast('Code invalide : 16 caractères minimum (lettres, chiffres, tirets). Cliquez sur « Générer un code ».'); return; }
       const cfg = FIREBASE_CONFIG || parseConfigText($('syncCfg').value) || sync.config;
       if (!cfg) { toast('Collez d\'abord la configuration Firebase (étape 1)'); return; }
@@ -2279,7 +2308,14 @@
       toast('Synchronisation désactivée');
     });
     $('btnSyncNow').addEventListener('click', () => { if (syncOn) pushNow(); else syncConnect(); });
-    $('btnSyncLink').addEventListener('click', () => copyText(inviteLink(), "Lien d'invitation copié 📋 Envoyez-le à votre famille"));
+    $('btnSyncLink').addEventListener('click', () => {
+      if (location.protocol === 'file:') {
+        alert("Attention : cette page est ouverte depuis un fichier de votre ordinateur, donc le lien ne marchera pas sur le téléphone.\n\nOuvrez l'application depuis son adresse en ligne (GitHub Pages, qui commence par https://) et copiez le lien depuis cette page-là.");
+        return;
+      }
+      copyText(inviteLink(), "Lien d'invitation copié 📋 Envoyez-le à votre famille");
+    });
+    $('btnSyncInfo').addEventListener('click', () => copyText(connectionInfo(), "Infos copiées 📋 Collez-les dans la case 1 de l'autre appareil, puis cliquez sur Activer"));
     $('btnSyncCopyCode').addEventListener('click', () => copyText(sync.code, 'Code copié 📋'));
     $('syncChip').addEventListener('click', () => {
       const s = $('syncSection');
